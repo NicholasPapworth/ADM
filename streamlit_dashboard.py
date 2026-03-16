@@ -47,7 +47,8 @@ import altair as alt
 
 # Title and layout
 st.set_page_config(
-    page_title="Fertiliser Affordability Dashboard",
+    page_title="Hello Abigail. Don't say I never do anything for you. 
+    Fertiliser Affordability Dashboard",
     page_icon="🌾",
     layout="wide",
 )
