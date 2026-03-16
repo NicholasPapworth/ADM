@@ -297,7 +297,7 @@ selected_metric_key = metric_options[selected_metric_label]
 # Main content
 ###############################
 
-st.title("📊 Fertiliser Affordability Dashboard")
+st.title("Fertiliser Affordability Dashboard")
 st.markdown(
     """
     Use the controls in the sidebar to explore how fertiliser prices
