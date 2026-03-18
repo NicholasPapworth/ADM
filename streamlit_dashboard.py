@@ -200,13 +200,6 @@ def compute_viewer_metric(chart_df: pd.DataFrame, metric_key: str) -> pd.DataFra
     chart_df = chart_df.dropna(subset=["value"])
     chart_df = chart_df.sort_values(["Product", "Date"])
 
-    # One value per Date/Product for plotting
-    chart_df = (
-        chart_df.groupby(["Date", "Product"], as_index=False)["value"]
-        .mean()
-        .sort_values(["Product", "Date"])
-    )
-
     if metric_key == "ratio":
         return chart_df
 
@@ -377,11 +370,7 @@ plot_data = df[mask].copy()
 if selected_metric_key == "cost_pct":
     chart_df = prepare_long_form(plot_data, selected_products, "cost_pct")
     chart_df = chart_df.dropna(subset=["value"])
-    chart_df = (
-        chart_df.groupby(["Date", "Product"], as_index=False)["value"]
-        .mean()
-        .sort_values(["Product", "Date"])
-    )
+    chart_df = chart_df.sort_values(["Product", "Date"])
 else:
     base_chart_df = prepare_long_form(plot_data, selected_products, "ratio")
     chart_df = compute_viewer_metric(base_chart_df, selected_metric_key)
