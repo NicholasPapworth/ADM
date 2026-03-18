@@ -355,6 +355,13 @@ def prepare_long_form(data: pd.DataFrame, products: List[str], metric_key: str) 
 
 chart_df = prepare_long_form(plot_data, selected_products, selected_metric_key)
 
+chart_df = (
+    chart_df
+    .dropna(subset=["value"])
+    .groupby(["Date", "Product"], as_index=False)["value"]
+    .mean()
+)
+
 ###############################
 # Plotting
 ###############################
