@@ -85,25 +85,48 @@ def load_workbook(uploaded_file=None) -> pd.DataFrame:
     ratio_columns = [f"{c}_ratio" for c in fert_cols]
     analytics["Basket_ratio"] = analytics[ratio_columns].mean(axis=1, skipna=True)
 
-    # Programme cost assumptions
-    N_REQUIREMENT = 220  # kg/ha
-    YIELD = 8.5          # t/ha
+    # Crop-specific programme cost assumptions
+    crop_assumptions = {
+        "Feed Wheat": {
+            "n_requirement": 220,   # kg N/ha
+            "yield": 8.5,           # t/ha
+        },
+        "Oilseed Rape": {
+            "n_requirement": 180,   # kg N/ha
+            "yield": 3.5,           # t/ha
+        },
+    }
 
-    nitram_tonnes = N_REQUIREMENT / (0.345 * 1000)
-    urea_tonnes = N_REQUIREMENT / (0.46 * 1000)
-    imp_an_tonnes = nitram_tonnes
+    # Map assumptions onto each row
+    analytics["N_REQUIREMENT"] = analytics["Commodity"].map(
+        lambda x: crop_assumptions.get(x, {}).get("n_requirement", np.nan)
+    )
+    analytics["YIELD_ASSUMPTION"] = analytics["Commodity"].map(
+        lambda x: crop_assumptions.get(x, {}).get("yield", np.nan)
+    )
 
+    # Tonnes of product required per hectare
+    analytics["Nitram_tonnes_per_ha"] = analytics["N_REQUIREMENT"] / (0.345 * 1000)
+    analytics["Imported_AN_tonnes_per_ha"] = analytics["N_REQUIREMENT"] / (0.345 * 1000)
+    analytics["Urea_tonnes_per_ha"] = analytics["N_REQUIREMENT"] / (0.46 * 1000)
+
+    # Revenue per hectare
+    analytics["Crop_Revenue_per_ha"] = (
+        analytics["YIELD_ASSUMPTION"] * analytics["Average Price"]
+    )
+
+    # Nitrogen cost as % of crop revenue
     analytics["Nitram_cost_pct"] = (
-        analytics["Nitram"] * nitram_tonnes
-    ) / (YIELD * analytics["Average Price"]) * 100
+        analytics["Nitram"] * analytics["Nitram_tonnes_per_ha"]
+    ) / analytics["Crop_Revenue_per_ha"] * 100
 
     analytics["Imported_AN_cost_pct"] = (
-        analytics["Imported Ammonium Nitrate"] * imp_an_tonnes
-    ) / (YIELD * analytics["Average Price"]) * 100
+        analytics["Imported Ammonium Nitrate"] * analytics["Imported_AN_tonnes_per_ha"]
+    ) / analytics["Crop_Revenue_per_ha"] * 100
 
     analytics["Urea_cost_pct"] = (
-        analytics["Granular Urea"] * urea_tonnes
-    ) / (YIELD * analytics["Average Price"]) * 100
+        analytics["Granular Urea"] * analytics["Urea_tonnes_per_ha"]
+    ) / analytics["Crop_Revenue_per_ha"] * 100
 
     # Parse "Delivery Month and Year" like "Nov 2024"
     delivery_parts = analytics["Delivery Month and Year"].astype(str).str.strip().str.extract(
@@ -118,7 +141,6 @@ def load_workbook(uploaded_file=None) -> pd.DataFrame:
     )
 
     return analytics
-
 
 @st.cache_data
 def get_metric_description(metric_key: str) -> str:
