@@ -9,15 +9,11 @@ affordability across crops and regions. It reads data from the
 Key logic:
 - Load raw data
 - Filter by the user's selected commodity, home, date range
-- Filter to a rolling forward delivery month series
+- Select a forward delivery month
+- For each observation date, choose the nearest available delivery
+  month-year to that target month
 - Build the selected product series
 - Calculate viewer-specific metrics only on that filtered series
-
-This ensures that if the user selects:
-Feed Wheat + East Anglia + November + Granular Urea,
-then percentile/z-score/index are calculated only versus the
-historical East Anglia Granular Urea vs Feed Wheat November-forward
-series that the user is actually viewing.
 """
 
 from pathlib import Path
@@ -46,6 +42,13 @@ ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", DEFAULT_ADMIN_PASSWORD)
 ###############################
 # Utility functions
 ###############################
+
+MONTH_ABBR_TO_NUM = {
+    "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4,
+    "May": 5, "Jun": 6, "Jul": 7, "Aug": 8,
+    "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12
+}
+
 
 @st.cache_data
 def load_workbook(uploaded_file=None) -> pd.DataFrame:
@@ -79,7 +82,6 @@ def load_workbook(uploaded_file=None) -> pd.DataFrame:
     for col in fert_cols:
         analytics[f"{col}_ratio"] = analytics[col] / analytics["Average Price"]
 
-    # Basket ratio only
     ratio_columns = [f"{c}_ratio" for c in fert_cols]
     analytics["Basket_ratio"] = analytics[ratio_columns].mean(axis=1, skipna=True)
 
@@ -102,6 +104,18 @@ def load_workbook(uploaded_file=None) -> pd.DataFrame:
     analytics["Urea_cost_pct"] = (
         analytics["Granular Urea"] * urea_tonnes
     ) / (YIELD * analytics["Average Price"]) * 100
+
+    # Parse "Delivery Month and Year" like "Nov 2024"
+    delivery_parts = analytics["Delivery Month and Year"].astype(str).str.strip().str.extract(
+        r"^(?P<month>[A-Za-z]{3})\s+(?P<year>\d{4})$"
+    )
+    analytics["DeliveryMonthNum"] = delivery_parts["month"].map(MONTH_ABBR_TO_NUM)
+    analytics["DeliveryYearNum"] = pd.to_numeric(delivery_parts["year"], errors="coerce")
+
+    # Convert delivery label into a comparable month index
+    analytics["DeliveryMonthIndex"] = (
+        analytics["DeliveryYearNum"] * 12 + analytics["DeliveryMonthNum"]
+    )
 
     return analytics
 
@@ -147,25 +161,56 @@ def get_metric_description(metric_key: str) -> str:
     return descriptions.get(metric_key, "")
 
 
-def build_target_delivery_label(date_series: pd.Series, target_month_num: int) -> pd.Series:
+def build_target_month_index(date_series: pd.Series, target_month_num: int) -> pd.Series:
     """
-    For each observation date, build the next occurrence of the selected
-    delivery month.
+    For each observation date, build the target month index for the next occurrence
+    of the selected month.
 
-    Example for target_month_num=11 (November):
-    - 2024-05-01 -> Nov 2024
-    - 2024-12-01 -> Nov 2025
+    Example target_month_num=11:
+    - 2024-05 -> Nov 2024
+    - 2024-12 -> Nov 2025
     """
     obs_month = date_series.dt.month
     obs_year = date_series.dt.year
-
     target_year = np.where(obs_month <= target_month_num, obs_year, obs_year + 1)
+    return pd.Series(target_year * 12 + target_month_num, index=date_series.index)
 
-    month_abbr = pd.to_datetime(
-        pd.Series([f"2000-{target_month_num:02d}-01"] * len(date_series))
-    ).dt.strftime("%b")
 
-    return month_abbr + " " + pd.Series(target_year, index=date_series.index).astype(str)
+def select_nearest_forward_rows(data: pd.DataFrame, target_month_num: int) -> pd.DataFrame:
+    """
+    For each observation date, select the nearest available delivery row to the
+    target forward month.
+
+    This preserves continuity better than demanding an exact delivery label match.
+    """
+    if data.empty:
+        return data.copy()
+
+    working = data.copy()
+
+    working = working.dropna(subset=["DeliveryMonthIndex"]).copy()
+    working["TargetMonthIndex"] = build_target_month_index(working["Date"], target_month_num)
+
+    # Distance to the ideal target
+    working["ForwardDistance"] = (working["DeliveryMonthIndex"] - working["TargetMonthIndex"]).abs()
+
+    # Tie-break: prefer future/at-target over earlier if equally close
+    working["ForwardBias"] = np.where(
+        working["DeliveryMonthIndex"] >= working["TargetMonthIndex"], 0, 1
+    )
+
+    working = working.sort_values(
+        ["Date", "ForwardDistance", "ForwardBias", "DeliveryMonthIndex"]
+    )
+
+    # One best row per observation date / commodity / home
+    best = (
+        working.groupby(["Date", "Commodity", "Home"], as_index=False)
+        .first()
+        .copy()
+    )
+
+    return best.sort_values("Date")
 
 
 def prepare_long_form(data: pd.DataFrame, products: List[str], metric_key: str) -> pd.DataFrame:
@@ -397,7 +442,8 @@ st.markdown(
     Use the controls in the sidebar to explore how fertiliser prices
     compare to crop values over time. Select a commodity, region,
     forward delivery month, date range, products and a metric to see the results.
-    Hover over the lines for precise values.
+    The forward month logic uses the nearest available quote to the selected
+    seasonal target from each observation date.
     """
 )
 
@@ -410,16 +456,8 @@ mask = (
 
 plot_data = df[mask].copy()
 
-# Build rolling forward delivery month label
-plot_data["Target Delivery Month and Year"] = build_target_delivery_label(
-    plot_data["Date"],
-    selected_delivery_month_num
-)
-
-# Keep only rows matching that rolling forward delivery series
-plot_data = plot_data[
-    plot_data["Delivery Month and Year"] == plot_data["Target Delivery Month and Year"]
-].copy()
+# Select nearest available forward match to the target seasonal month
+plot_data = select_nearest_forward_rows(plot_data, selected_delivery_month_num)
 
 # Build filtered base series first
 if selected_metric_key == "cost_pct":
@@ -454,8 +492,7 @@ if not chart_df.empty:
     st.altair_chart(line_chart, use_container_width=True)
 else:
     st.warning(
-        "No data available for the selected filters. This can happen if the chosen forward delivery month "
-        "does not exist for parts of the selected history."
+        "No data available for the selected filters."
     )
 
 
@@ -477,5 +514,7 @@ with st.expander("Metric description", expanded=False):
 # Data table
 ###############################
 
+with st.expander("Show data", expanded=False):
+    st.dataframe(chart_df.sort_values("Date"), use_container_width=True)
 with st.expander("Show data", expanded=False):
     st.dataframe(chart_df.sort_values("Date"), use_container_width=True)
