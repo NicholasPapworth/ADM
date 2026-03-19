@@ -9,14 +9,15 @@ affordability across crops and regions. It reads data from the
 Key logic:
 - Load raw data
 - Filter by the user's selected commodity, home, date range
+- Filter to a rolling forward delivery month series
 - Build the selected product series
 - Calculate viewer-specific metrics only on that filtered series
 
-This ensures that:
-if the user selects Feed Wheat + East Anglia + Granular Urea,
+This ensures that if the user selects:
+Feed Wheat + East Anglia + November + Granular Urea,
 then percentile/z-score/index are calculated only versus the
-historical East Anglia Granular Urea vs Feed Wheat series that
-the user is actually viewing.
+historical East Anglia Granular Urea vs Feed Wheat November-forward
+series that the user is actually viewing.
 """
 
 from pathlib import Path
@@ -146,6 +147,27 @@ def get_metric_description(metric_key: str) -> str:
     return descriptions.get(metric_key, "")
 
 
+def build_target_delivery_label(date_series: pd.Series, target_month_num: int) -> pd.Series:
+    """
+    For each observation date, build the next occurrence of the selected
+    delivery month.
+
+    Example for target_month_num=11 (November):
+    - 2024-05-01 -> Nov 2024
+    - 2024-12-01 -> Nov 2025
+    """
+    obs_month = date_series.dt.month
+    obs_year = date_series.dt.year
+
+    target_year = np.where(obs_month <= target_month_num, obs_year, obs_year + 1)
+
+    month_abbr = pd.to_datetime(
+        pd.Series([f"2000-{target_month_num:02d}-01"] * len(date_series))
+    ).dt.strftime("%b")
+
+    return month_abbr + " " + pd.Series(target_year, index=date_series.index).astype(str)
+
+
 def prepare_long_form(data: pd.DataFrame, products: List[str], metric_key: str) -> pd.DataFrame:
     """
     Build a long-form dataframe from the filtered dataset.
@@ -160,7 +182,7 @@ def prepare_long_form(data: pd.DataFrame, products: List[str], metric_key: str) 
         if prod == "Basket":
             if metric_key == "cost_pct":
                 continue
-            col_name = "Basket_ratio" if metric_key in {"ratio", "z", "percentile", "index"} else "Basket_ratio"
+            col_name = "Basket_ratio"
             if col_name in data.columns:
                 subset = data[["Date", col_name]].rename(columns={col_name: "value"})
                 subset["Product"] = "Basket"
@@ -295,6 +317,28 @@ selected_home = st.sidebar.selectbox(
     "Region (Home)", options=sorted(homes), index=0
 )
 
+delivery_month_map = {
+    "January": 1,
+    "February": 2,
+    "March": 3,
+    "April": 4,
+    "May": 5,
+    "June": 6,
+    "July": 7,
+    "August": 8,
+    "September": 9,
+    "October": 10,
+    "November": 11,
+    "December": 12,
+}
+
+selected_delivery_month_name = st.sidebar.selectbox(
+    "Forward Delivery Month",
+    options=list(delivery_month_map.keys()),
+    index=10,  # November default
+)
+selected_delivery_month_num = delivery_month_map[selected_delivery_month_name]
+
 crop_df = df[
     (df["Commodity"] == selected_commodity)
     & (df["Home"] == selected_home)
@@ -352,8 +396,8 @@ st.markdown(
     """
     Use the controls in the sidebar to explore how fertiliser prices
     compare to crop values over time. Select a commodity, region,
-    date range, products and a metric to see the results. Hover
-    over the lines for precise values.
+    forward delivery month, date range, products and a metric to see the results.
+    Hover over the lines for precise values.
     """
 )
 
@@ -365,6 +409,17 @@ mask = (
 )
 
 plot_data = df[mask].copy()
+
+# Build rolling forward delivery month label
+plot_data["Target Delivery Month and Year"] = build_target_delivery_label(
+    plot_data["Date"],
+    selected_delivery_month_num
+)
+
+# Keep only rows matching that rolling forward delivery series
+plot_data = plot_data[
+    plot_data["Delivery Month and Year"] == plot_data["Target Delivery Month and Year"]
+].copy()
 
 # Build filtered base series first
 if selected_metric_key == "cost_pct":
@@ -398,7 +453,10 @@ if not chart_df.empty:
     )
     st.altair_chart(line_chart, use_container_width=True)
 else:
-    st.warning("No data available for the selected filters and metric.")
+    st.warning(
+        "No data available for the selected filters. This can happen if the chosen forward delivery month "
+        "does not exist for parts of the selected history."
+    )
 
 
 ###############################
